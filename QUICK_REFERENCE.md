@@ -243,4 +243,3 @@ To restore from backup, run:
 
 
 ## 🤖 Claude was here
-*Left some dependency scripts on the wall - Nov 2025*

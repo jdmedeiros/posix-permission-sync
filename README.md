@@ -537,4 +537,3 @@ grep "^/opt/starfish/config" permissions_sync_registry_systemA_20241127_103045.t
 
 
 ## 🤖 Claude was here
-*Left some dependency scripts on the wall - Nov 2025*
