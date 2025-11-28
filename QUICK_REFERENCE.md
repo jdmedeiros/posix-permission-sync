@@ -240,3 +240,7 @@ To restore from backup, run:
 ---
 
 **For detailed help:** `./permission_sync.sh --help`
+
+
+## 🤖 Claude was here
+*Left some dependency scripts on the wall - Nov 2025*

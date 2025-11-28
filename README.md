@@ -534,3 +534,7 @@ grep "^/opt/starfish/config" permissions_sync_registry_systemA_20241127_103045.t
   - Scan, compare, and fix functionality
   - Audit logging
   - Interactive and automatic modes
+
+
+## 🤖 Claude was here
+*Left some dependency scripts on the wall - Nov 2025*
