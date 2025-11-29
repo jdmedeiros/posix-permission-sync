@@ -34,6 +34,11 @@ TARGET_DIR=""
 REGISTRY_FILE=""
 CLEANUP_ON_EXIT=true
 
+# Sync options (what to sync)
+SYNC_USER=true
+SYNC_GROUP=true
+SYNC_PERMS=true
+
 ################################################################################
 # Cleanup and Setup Functions
 ################################################################################
@@ -61,6 +66,21 @@ setup_work_directory() {
 ################################################################################
 # Interactive Configuration Functions
 ################################################################################
+
+show_sync_config() {
+    echo -e "${CYAN}Sync Configuration:${NC}"
+    echo -n "  Syncing: "
+    local parts=()
+    [[ "$SYNC_USER" = true ]] && parts+=("user")
+    [[ "$SYNC_GROUP" = true ]] && parts+=("group")
+    [[ "$SYNC_PERMS" = true ]] && parts+=("permissions")
+
+    if [[ ${#parts[@]} -eq 0 ]]; then
+        echo -e "${RED}NOTHING (all disabled)${NC}"
+    else
+        echo -e "${YELLOW}$(IFS=', '; echo "${parts[*]}")${NC}"
+    fi
+}
 
 prompt_target_directory() {
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -135,7 +155,7 @@ create_backup() {
     find "$TARGET_DIR" -printf "%p|%u|%g|%m\n" 2>/dev/null | sort >> "$backup_file"
 
     if [[ $? -eq 0 ]]; then
-        local file_count=$(grep -v '^#' "$backup_file" | wc -l)
+        local file_count=$(grep -cv '^#' "$backup_file")
         echo -e "${GREEN}✓ Backup created successfully${NC}"
         echo -e "  Location: ${YELLOW}$backup_file${NC}"
         echo -e "  Files backed up: ${YELLOW}$file_count${NC}"
@@ -178,8 +198,14 @@ restore_from_backup() {
         return 1
     fi
 
-    echo -e "${YELLOW}⚠ WARNING: This will restore ownership from backup${NC}"
+    # Extract target directory from backup header
+    local backup_target_dir=$(grep "^# Target directory:" "$backup_file" | cut -d: -f2- | xargs)
+
+    echo -e "${YELLOW}⚠ WARNING: This will restore ownership and permissions from backup${NC}"
     echo -e "Backup file: $backup_file"
+    if [[ -n "$backup_target_dir" ]]; then
+        echo -e "Target directory: $backup_target_dir"
+    fi
     echo ""
     read -p "Are you sure you want to restore? (yes/no): " confirm
 
@@ -190,6 +216,9 @@ restore_from_backup() {
 
     echo -e "\n${CYAN}Restoring from backup...${NC}"
     log "Restoring permissions from backup: $backup_file"
+    if [[ -n "$backup_target_dir" ]]; then
+        log "Target directory from backup: $backup_target_dir"
+    fi
 
     local restored=0
     local failed=0
@@ -199,9 +228,33 @@ restore_from_backup() {
         [[ -z "$filepath" ]] && continue
 
         if [[ -e "$filepath" ]]; then
-            if chown "$user:$group" "$filepath" 2>/dev/null; then
+            local restore_success=true
+
+            # Restore ownership (user and/or group)
+            if [[ "$SYNC_USER" = true ]] || [[ "$SYNC_GROUP" = true ]]; then
+                local new_owner=""
+
+                if [[ "$SYNC_USER" = true ]] && [[ "$SYNC_GROUP" = true ]]; then
+                    new_owner="$user:$group"
+                elif [[ "$SYNC_USER" = true ]]; then
+                    new_owner="$user"
+                elif [[ "$SYNC_GROUP" = true ]]; then
+                    new_owner=":$group"
+                fi
+
+                if [[ -n "$new_owner" ]] && ! chown "$new_owner" "$filepath" 2>/dev/null; then
+                    restore_success=false
+                fi
+            fi
+
+            # Restore permissions
+            if [[ "$SYNC_PERMS" = true ]] && ! chmod "$perms" "$filepath" 2>/dev/null; then
+                restore_success=false
+            fi
+
+            if [[ "$restore_success" = true ]]; then
                 ((restored++))
-                log_action "RESTORED" "$filepath" "unknown" "$user:$group"
+                log_action "RESTORED" "$filepath" "unknown" "$user:$group ($perms)"
             else
                 ((failed++))
                 log "FAILED: Could not restore $filepath"
@@ -265,7 +318,7 @@ scan_permissions() {
     } > "$output_file"
 
     if [[ $? -eq 0 ]]; then
-        local file_count=$(grep -v '^#' "$output_file" | wc -l)
+        local file_count=$(grep -cv '^#' "$output_file")
         echo -e "${GREEN}✓ Scan completed successfully${NC}"
         echo -e "  Files scanned: ${YELLOW}$file_count${NC}"
         echo -e "  Registry saved: ${YELLOW}$output_file${NC}"
@@ -337,6 +390,7 @@ compare_and_fix() {
     echo "System: $(hostname)"
     echo "Reference: $reference_file"
     echo "Target Directory: $TARGET_DIR"
+    show_sync_config
     echo "Mode: $([ "$fix_mode" = true ] && echo 'FIX' || echo 'COMPARE ONLY')"
     echo "Started: $(date)"
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
@@ -385,22 +439,84 @@ compare_and_fix() {
         current_group=$(stat -c '%G' "$filepath" 2>/dev/null)
         current_perms=$(stat -c '%a' "$filepath" 2>/dev/null)
 
-        # Compare
-        if [[ "$current_user" != "$user" ]] || [[ "$current_group" != "$group" ]]; then
+        # Check if anything is different (based on what we're syncing)
+        user_different=false
+        group_different=false
+        perms_different=false
+
+        if [[ "$SYNC_USER" = true ]] && [[ "$current_user" != "$user" ]]; then
+            user_different=true
+        fi
+
+        if [[ "$SYNC_GROUP" = true ]] && [[ "$current_group" != "$group" ]]; then
+            group_different=true
+        fi
+
+        if [[ "$SYNC_PERMS" = true ]] && [[ "$current_perms" != "$perms" ]]; then
+            perms_different=true
+        fi
+
+        # Report and fix differences
+        if [[ "$user_different" = true ]] || [[ "$group_different" = true ]] || [[ "$perms_different" = true ]]; then
             ((different_files++))
             echo -e "${RED}✗ DIFFERENT: $filepath${NC}"
             echo "  Expected: $user:$group ($perms)"
             echo "  Current:  $current_user:$current_group ($current_perms)"
 
             if [[ "$fix_mode" = true ]]; then
-                # Attempt to fix
-                if chown "$user:$group" "$filepath" 2>/dev/null; then
-                    echo -e "${GREEN}  ✓ FIXED ownership${NC}"
-                    log_action "FIXED_OWNERSHIP" "$filepath" "$current_user:$current_group" "$user:$group"
+                local fix_success=true
+
+                # Fix user and/or group if different
+                if [[ "$user_different" = true ]] || [[ "$group_different" = true ]]; then
+                    local new_owner=""
+
+                    # Determine what to change
+                    if [[ "$SYNC_USER" = true ]] && [[ "$SYNC_GROUP" = true ]]; then
+                        new_owner="$user:$group"
+                    elif [[ "$SYNC_USER" = true ]]; then
+                        new_owner="$user"
+                    elif [[ "$SYNC_GROUP" = true ]]; then
+                        new_owner=":$group"
+                    fi
+
+                    if [[ -n "$new_owner" ]]; then
+                        if chown "$new_owner" "$filepath" 2>/dev/null; then
+                            local change_desc=""
+                            if [[ "$user_different" = true ]]; then
+                                change_desc="user"
+                            fi
+                            if [[ "$group_different" = true ]]; then
+                                if [[ -n "$change_desc" ]]; then
+                                    change_desc="$change_desc and group"
+                                else
+                                    change_desc="group"
+                                fi
+                            fi
+                            echo -e "${GREEN}  ✓ FIXED $change_desc${NC}"
+                            log_action "FIXED_OWNERSHIP" "$filepath" "$current_user:$current_group" "$user:$group"
+                        else
+                            echo -e "${RED}  ✗ FAILED to fix ownership (may need root/sudo)${NC}"
+                            log "FAILED: Could not change ownership of $filepath"
+                            fix_success=false
+                        fi
+                    fi
+                fi
+
+                # Fix permissions if different
+                if [[ "$perms_different" = true ]]; then
+                    if chmod "$perms" "$filepath" 2>/dev/null; then
+                        echo -e "${GREEN}  ✓ FIXED permissions${NC}"
+                        log_action "FIXED_PERMISSIONS" "$filepath" "$current_perms" "$perms"
+                    else
+                        echo -e "${RED}  ✗ FAILED to fix permissions (may need root/sudo)${NC}"
+                        log "FAILED: Could not change permissions of $filepath"
+                        fix_success=false
+                    fi
+                fi
+
+                if [[ "$fix_success" = true ]]; then
                     ((fixed_files++))
                 else
-                    echo -e "${RED}  ✗ FAILED to fix (may need root/sudo)${NC}"
-                    log "FAILED: Could not change ownership of $filepath"
                     ((failed_fixes++))
                 fi
             fi
@@ -413,7 +529,7 @@ compare_and_fix() {
     echo -e "${BLUE}Summary${NC}"
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo "Total files in reference: $total_files"
-    echo "Files with different ownership: $different_files"
+    echo "Files with differences: $different_files"
     echo "Missing files: $missing_files"
 
     if [[ "$fix_mode" = true ]]; then
@@ -459,7 +575,7 @@ interactive_fix() {
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${YELLOW}⚠ WARNING: Permission Modification Mode${NC}"
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo "This will compare and potentially modify file ownership."
+    echo "This will compare and potentially modify file ownership and permissions."
     echo "A backup will be created before making any changes."
     echo ""
 
@@ -483,7 +599,7 @@ ${CYAN}Permission Sync Script - Interactive Mode${NC}
 ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}
 
 ${GREEN}USAGE:${NC}
-    $0 [OPTIONS]
+    $0 [OPTIONS] [SYNC_FLAGS]
 
 ${GREEN}OPTIONS:${NC}
     ${YELLOW}--scan${NC}              Generate permission snapshot (interactive)
@@ -507,6 +623,17 @@ ${GREEN}OPTIONS:${NC}
 
     ${YELLOW}--help${NC}              Show this help message
 
+${GREEN}SYNC FLAGS (optional - control what to sync):${NC}
+    ${YELLOW}--user-only${NC}         Sync only user ownership
+    ${YELLOW}--group-only${NC}        Sync only group ownership
+    ${YELLOW}--perms-only${NC}        Sync only permission mode bits (rwx/755/644)
+    ${YELLOW}--no-user${NC}           Skip user (sync group and permissions)
+    ${YELLOW}--no-group${NC}          Skip group (sync user and permissions)
+    ${YELLOW}--no-perms${NC}          Skip permissions (sync user and group only)
+
+    ${CYAN}Default: sync everything (user, group, and permissions)${NC}
+    ${CYAN}Flags can be combined: --user-only with --fix syncs only user${NC}
+
 ${GREEN}EXAMPLES:${NC}
     ${CYAN}# Step 1: On System A - Generate reference${NC}
     $0 --scan
@@ -518,11 +645,20 @@ ${GREEN}EXAMPLES:${NC}
     cd /tmp
     $0 --compare permissions_sync_registry_systemA_20241127_103045.txt
 
-    ${CYAN}# Step 4: On System B - Fix with backup${NC}
+    ${CYAN}# Step 4: On System B - Fix everything${NC}
     sudo $0 --fix permissions_sync_registry_systemA_20241127_103045.txt
 
-    ${CYAN}# If something goes wrong - Restore from backup${NC}
-    sudo $0 --restore .permission_sync_20241127_104523/backups/ownership_backup_*.txt
+    ${CYAN}# Fix only user ownership${NC}
+    sudo $0 --fix --user-only permissions_sync_registry_systemA_20241127_103045.txt
+
+    ${CYAN}# Fix only permissions (mode bits)${NC}
+    sudo $0 --fix --perms-only permissions_sync_registry_systemA_20241127_103045.txt
+
+    ${CYAN}# Fix user and group, but not permissions${NC}
+    sudo $0 --fix --no-perms permissions_sync_registry_systemA_20241127_103045.txt
+
+    ${CYAN}# Restore only group ownership from backup${NC}
+    sudo $0 --restore --group-only .permission_sync_*/backups/ownership_backup_*.txt
 
     ${CYAN}# List available backups${NC}
     $0 --list-backups
@@ -553,39 +689,132 @@ EOF
 }
 
 # Parse arguments
-case "${1:-}" in
+COMMAND=""
+COMMAND_ARG=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        # Sync flags (can appear anywhere)
+        --user-only)
+            SYNC_USER=true
+            SYNC_GROUP=false
+            SYNC_PERMS=false
+            shift
+            ;;
+        --group-only)
+            SYNC_USER=false
+            SYNC_GROUP=true
+            SYNC_PERMS=false
+            shift
+            ;;
+        --perms-only)
+            SYNC_USER=false
+            SYNC_GROUP=false
+            SYNC_PERMS=true
+            shift
+            ;;
+        --no-user)
+            SYNC_USER=false
+            shift
+            ;;
+        --no-group)
+            SYNC_GROUP=false
+            shift
+            ;;
+        --no-perms)
+            SYNC_PERMS=false
+            shift
+            ;;
+        # Main commands that don't take arguments
+        --scan|--list-backups|--help)
+            COMMAND="$1"
+            shift
+            ;;
+        # Main commands that require a file argument
+        --compare|--fix|--restore)
+            COMMAND="$1"
+            shift
+            ;;
+        # Anything that doesn't start with -- is likely a file argument
+        *)
+            if [[ "$COMMAND" =~ ^--(compare|fix|restore)$ ]] && [[ -z "$COMMAND_ARG" ]] && [[ ! "$1" =~ ^-- ]]; then
+                COMMAND_ARG="$1"
+                shift
+            else
+                echo -e "${RED}Error: Unknown or unexpected argument '$1'${NC}" >&2
+                show_usage
+                exit 1
+            fi
+            ;;
+    esac
+done
+
+# Default to help if no command given
+if [[ -z "$COMMAND" ]]; then
+    COMMAND="--help"
+fi
+
+# Execute command
+case "$COMMAND" in
     --scan)
+        # Validate at least one sync option is enabled
+        if [[ "$SYNC_USER" = false ]] && [[ "$SYNC_GROUP" = false ]] && [[ "$SYNC_PERMS" = false ]]; then
+            echo -e "${RED}Error: At least one sync option must be enabled${NC}" >&2
+            echo -e "${YELLOW}You've disabled user, group, AND permissions - nothing to sync!${NC}" >&2
+            exit 1
+        fi
         scan_permissions
         ;;
     --compare)
-        if [[ -z "${2:-}" ]]; then
+        # Validate at least one sync option is enabled
+        if [[ "$SYNC_USER" = false ]] && [[ "$SYNC_GROUP" = false ]] && [[ "$SYNC_PERMS" = false ]]; then
+            echo -e "${RED}Error: At least one sync option must be enabled${NC}" >&2
+            echo -e "${YELLOW}You've disabled user, group, AND permissions - nothing to sync!${NC}" >&2
+            exit 1
+        fi
+        if [[ -z "$COMMAND_ARG" ]]; then
             echo -e "${RED}Error: --compare requires a reference file${NC}" >&2
             show_usage
             exit 1
         fi
-        compare_and_fix "$2" false
+        compare_and_fix "$COMMAND_ARG" false
         ;;
     --fix)
-        if [[ -z "${2:-}" ]]; then
+        # Validate at least one sync option is enabled
+        if [[ "$SYNC_USER" = false ]] && [[ "$SYNC_GROUP" = false ]] && [[ "$SYNC_PERMS" = false ]]; then
+            echo -e "${RED}Error: At least one sync option must be enabled${NC}" >&2
+            echo -e "${YELLOW}You've disabled user, group, AND permissions - nothing to sync!${NC}" >&2
+            exit 1
+        fi
+        if [[ -z "$COMMAND_ARG" ]]; then
             echo -e "${RED}Error: --fix requires a reference file${NC}" >&2
             show_usage
             exit 1
         fi
-        interactive_fix "$2"
+        interactive_fix "$COMMAND_ARG"
         ;;
     --restore)
-        if [[ -z "${2:-}" ]]; then
+        # Validate at least one sync option is enabled
+        if [[ "$SYNC_USER" = false ]] && [[ "$SYNC_GROUP" = false ]] && [[ "$SYNC_PERMS" = false ]]; then
+            echo -e "${RED}Error: At least one sync option must be enabled${NC}" >&2
+            echo -e "${YELLOW}You've disabled user, group, AND permissions - nothing to sync!${NC}" >&2
+            exit 1
+        fi
+        if [[ -z "$COMMAND_ARG" ]]; then
             echo -e "${RED}Error: --restore requires a backup file${NC}" >&2
             show_usage
             exit 1
         fi
         setup_work_directory
-        restore_from_backup "$2"
+        restore_from_backup "$COMMAND_ARG"
         ;;
     --list-backups)
         # Look for any working directories with backups
         echo -e "${CYAN}Searching for backup directories...${NC}\n"
         found_backups=false
+
+        # Enable nullglob so pattern doesn't show if nothing matches
+        shopt -s nullglob
         for work_dir in .permission_sync_*/backups; do
             if [[ -d "$work_dir" ]]; then
                 BACKUP_DIR="$work_dir"
@@ -593,17 +822,21 @@ case "${1:-}" in
                 found_backups=true
             fi
         done
+        shopt -u nullglob
+
         if [[ "$found_backups" = false ]]; then
             echo "No backup directories found."
         fi
         CLEANUP_ON_EXIT=false
         ;;
-    --help|"")
+    --help)
         show_usage
         ;;
     *)
-        echo -e "${RED}Error: Unknown option $1${NC}" >&2
+        echo -e "${RED}Error: Unknown command $COMMAND${NC}" >&2
         show_usage
         exit 1
         ;;
 esac
+
+## 🤖 Claude was here
