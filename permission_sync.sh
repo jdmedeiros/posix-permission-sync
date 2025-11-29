@@ -22,12 +22,14 @@ BACKUP_DIR="${WORK_DIR}/backups"
 LOG_FILE="${WORK_DIR}/permission_sync_${TIMESTAMP}.log"
 
 # Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+ESC="$(printf '\033')"
+RED="${ESC}[0;31m"
+GREEN="${ESC}[0;32m"
+YELLOW="${ESC}[1;33m"
+BLUE="${ESC}[0;34m"
+CYAN="${ESC}[0;36m"
+NC="${ESC}[0m"
+
 
 # Global variables
 TARGET_DIR=""
