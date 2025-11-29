@@ -28,8 +28,7 @@ GREEN="${ESC}[0;32m"
 YELLOW="${ESC}[1;33m"
 BLUE="${ESC}[0;34m"
 CYAN="${ESC}[0;36m"
-NC="${ESC}[0m"
-
+NC="${ESC}[0m" # No Color
 
 # Global variables
 TARGET_DIR=""
@@ -154,15 +153,23 @@ create_backup() {
     echo "# Format: filepath|user|group|permissions" >> "$backup_file"
     echo "#---" >> "$backup_file"
 
-    find "$TARGET_DIR" -printf "%p|%u|%g|%m\n" 2>/dev/null | sort >> "$backup_file"
+    find "$TARGET_DIR" -printf "%p|%u|%g|%m\n" 2>/dev/null | sort >> "$backup_file" || true
 
-    if [[ $? -eq 0 ]]; then
+    # Check if we got any files
+    if [[ -f "$backup_file" ]]; then
         local file_count=$(grep -cv '^#' "$backup_file")
-        echo -e "${GREEN}✓ Backup created successfully${NC}"
-        echo -e "  Location: ${YELLOW}$backup_file${NC}"
-        echo -e "  Files backed up: ${YELLOW}$file_count${NC}"
-        log "Backup created: $backup_file ($file_count files)"
-        echo "$backup_file"
+        if [[ $file_count -gt 0 ]]; then
+            echo -e "${GREEN}✓ Backup created successfully${NC}"
+            echo -e "  Location: ${YELLOW}$backup_file${NC}"
+            echo -e "  Files backed up: ${YELLOW}$file_count${NC}"
+            echo -e "${YELLOW}  Note: Some files may have been skipped due to permission restrictions${NC}"
+            log "Backup created: $backup_file ($file_count files)"
+            echo "$backup_file"
+        else
+            echo -e "${RED}✗ Backup failed: no files could be read${NC}" >&2
+            log "ERROR: Failed to create backup - no readable files"
+            return 1
+        fi
     else
         echo -e "${RED}✗ Failed to create backup${NC}" >&2
         log "ERROR: Failed to create backup"
@@ -187,7 +194,7 @@ list_backups() {
             local timestamp=$(basename "$backup" | sed 's/ownership_backup_\(.*\)\.txt/\1/')
             echo -e "${YELLOW}[$idx]${NC} $timestamp (Size: $size)"
             echo "     $backup"
-            ((idx++))
+            ((idx++)) || true
         fi
     done
 }
@@ -255,10 +262,10 @@ restore_from_backup() {
             fi
 
             if [[ "$restore_success" = true ]]; then
-                ((restored++))
+                ((restored++)) || true
                 log_action "RESTORED" "$filepath" "unknown" "$user:$group ($perms)"
             else
-                ((failed++))
+                ((failed++)) || true
                 log "FAILED: Could not restore $filepath"
             fi
         fi
@@ -316,20 +323,28 @@ scan_permissions() {
         echo "# Target directory: $TARGET_DIR"
         echo "# Format: filepath|user|group|permissions"
         echo "#---"
-        find "$TARGET_DIR" -printf "%p|%u|%g|%m\n" 2>/dev/null | sort
+        find "$TARGET_DIR" -printf "%p|%u|%g|%m\n" 2>/dev/null | sort || true
     } > "$output_file"
 
-    if [[ $? -eq 0 ]]; then
+    # Check if we got any files
+    if [[ -f "$output_file" ]]; then
         local file_count=$(grep -cv '^#' "$output_file")
-        echo -e "${GREEN}✓ Scan completed successfully${NC}"
-        echo -e "  Files scanned: ${YELLOW}$file_count${NC}"
-        echo -e "  Registry saved: ${YELLOW}$output_file${NC}"
-        log "Scan completed: $file_count files"
+        if [[ $file_count -gt 0 ]]; then
+            echo -e "${GREEN}✓ Scan completed successfully${NC}"
+            echo -e "  Files scanned: ${YELLOW}$file_count${NC}"
+            echo -e "  Registry saved: ${YELLOW}$output_file${NC}"
+            echo -e "${YELLOW}  Note: Some files may have been skipped due to permission restrictions${NC}"
+            log "Scan completed: $file_count files"
 
-        # Copy log to final location
-        cp "$LOG_FILE" "${SCRIPT_DIR}/scan_${TIMESTAMP}.log"
-        echo -e "  Log saved: ${YELLOW}${SCRIPT_DIR}/scan_${TIMESTAMP}.log${NC}"
-        echo -e "\n${GREEN}✓ Ready to transfer to other system${NC}"
+            # Copy log to final location
+            cp "$LOG_FILE" "${SCRIPT_DIR}/scan_${TIMESTAMP}.log"
+            echo -e "  Log saved: ${YELLOW}${SCRIPT_DIR}/scan_${TIMESTAMP}.log${NC}"
+            echo -e "\n${GREEN}✓ Ready to transfer to other system${NC}"
+        else
+            echo -e "${RED}✗ Scan failed: no files could be read${NC}" >&2
+            log "ERROR: Scan failed - no readable files"
+            exit 1
+        fi
     else
         echo -e "${RED}✗ Scan failed${NC}" >&2
         log "ERROR: Scan failed"
@@ -426,20 +441,32 @@ compare_and_fix() {
         [[ "$filepath" =~ ^#.* ]] && continue
         [[ -z "$filepath" ]] && continue
 
-        ((total_files++))
+        ((total_files++)) || true
 
         # Check if file exists on this system
         if [[ ! -e "$filepath" ]]; then
             echo -e "${YELLOW}⚠ MISSING: $filepath${NC}"
             log "MISSING: File does not exist on this system: $filepath"
-            ((missing_files++))
+            ((missing_files++)) || true
             continue
         fi
 
         # Get current ownership and permissions
-        current_user=$(stat -c '%U' "$filepath" 2>/dev/null)
-        current_group=$(stat -c '%G' "$filepath" 2>/dev/null)
-        current_perms=$(stat -c '%a' "$filepath" 2>/dev/null)
+        current_user=$(stat -c '%U' "$filepath" 2>/dev/null) || current_user="UNKNOWN"
+        current_group=$(stat -c '%G' "$filepath" 2>/dev/null) || current_group="UNKNOWN"
+        current_perms=$(stat -c '%a' "$filepath" 2>/dev/null) || current_perms="UNKNOWN"
+
+        # If we can't even stat the file, we definitely can't fix it
+        if [[ "$current_user" = "UNKNOWN" ]] || [[ "$current_group" = "UNKNOWN" ]] || [[ "$current_perms" = "UNKNOWN" ]]; then
+            echo -e "${RED}✗ INACCESSIBLE: $filepath${NC}"
+            echo "  Cannot read current permissions (may be 000 or other access issue)"
+            log "INACCESSIBLE: Cannot stat file: $filepath"
+            ((different_files++)) || true
+            if [[ "$fix_mode" = true ]]; then
+                ((failed_fixes++)) || true
+            fi
+            continue
+        fi
 
         # Check if anything is different (based on what we're syncing)
         user_different=false
@@ -460,7 +487,7 @@ compare_and_fix() {
 
         # Report and fix differences
         if [[ "$user_different" = true ]] || [[ "$group_different" = true ]] || [[ "$perms_different" = true ]]; then
-            ((different_files++))
+            ((different_files++)) || true
             echo -e "${RED}✗ DIFFERENT: $filepath${NC}"
             echo "  Expected: $user:$group ($perms)"
             echo "  Current:  $current_user:$current_group ($current_perms)"
@@ -517,9 +544,9 @@ compare_and_fix() {
                 fi
 
                 if [[ "$fix_success" = true ]]; then
-                    ((fixed_files++))
+                    ((fixed_files++)) || true
                 else
-                    ((failed_fixes++))
+                    ((failed_fixes++)) || true
                 fi
             fi
         fi
@@ -533,6 +560,9 @@ compare_and_fix() {
     echo "Total files in reference: $total_files"
     echo "Files with differences: $different_files"
     echo "Missing files: $missing_files"
+
+    # Log summary
+    log "Comparison complete: $total_files total files, $different_files different, $missing_files missing, $fixed_files fixed, $failed_fixes failed"
 
     if [[ "$fix_mode" = true ]]; then
         echo "Successfully fixed: $fixed_files"
@@ -667,9 +697,9 @@ ${GREEN}EXAMPLES:${NC}
 
 ${GREEN}SAFETY FEATURES:${NC}
     ✓ Interactive prompts for directory and filename
-    ✓ Automatic versioned backups (timestamped)
+    ✓ Default backups with opt-out (timestamped)
     ✓ Temporary working directory for all operations
-    ✓ Automatic cleanup (unless backups exist)
+    ✓ Automatic cleanup (unless backups created)
     ✓ Full audit trail in log files
     ✓ Confirmation prompts before modifications
 
@@ -681,8 +711,8 @@ ${GREEN}WORKING DIRECTORIES:${NC}
 
 ${GREEN}NOTES:${NC}
     - Fixing permissions typically requires root/sudo access
-    - Backups are automatically versioned with timestamps
-    - Working directories are preserved when backups exist
+    - Backups are versioned with timestamps
+    - Working directories are preserved when backups are created
     - All operations create detailed audit logs
     - Registry filename suggestions include hostname and timestamp
 
@@ -840,5 +870,3 @@ case "$COMMAND" in
         exit 1
         ;;
 esac
-
-## 🤖 Claude was here
