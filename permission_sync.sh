@@ -34,6 +34,7 @@ NC="${ESC}[0m" # No Color
 TARGET_DIR=""
 REGISTRY_FILE=""
 CLEANUP_ON_EXIT=true
+QUIET_MODE=false
 
 # Sync options (what to sync)
 SYNC_USER=true
@@ -488,9 +489,12 @@ compare_and_fix() {
         # Report and fix differences
         if [[ "$user_different" = true ]] || [[ "$group_different" = true ]] || [[ "$perms_different" = true ]]; then
             ((different_files++)) || true
-            echo -e "${RED}✗ DIFFERENT: $filepath${NC}"
-            echo "  Expected: $user:$group ($perms)"
-            echo "  Current:  $current_user:$current_group ($current_perms)"
+
+            if [[ "$QUIET_MODE" = false ]]; then
+                echo -e "${RED}✗ DIFFERENT: $filepath${NC}"
+                echo "  Expected: $user:$group ($perms)"
+                echo "  Current:  $current_user:$current_group ($current_perms)"
+            fi
 
             if [[ "$fix_mode" = true ]]; then
                 local fix_success=true
@@ -509,7 +513,7 @@ compare_and_fix() {
                     fi
 
                     if [[ -n "$new_owner" ]]; then
-                        if chown "$new_owner" "$filepath" 2>/dev/null; then
+                        if chown -h "$new_owner" "$filepath" 2>/dev/null; then
                             local change_desc=""
                             if [[ "$user_different" = true ]]; then
                                 change_desc="user"
@@ -521,7 +525,9 @@ compare_and_fix() {
                                     change_desc="group"
                                 fi
                             fi
-                            echo -e "${GREEN}  ✓ FIXED $change_desc${NC}"
+                            if [[ "$QUIET_MODE" = false ]]; then
+                                echo -e "${GREEN}  ✓ FIXED $change_desc${NC}"
+                            fi
                             log_action "FIXED_OWNERSHIP" "$filepath" "$current_user:$current_group" "$user:$group"
                         else
                             echo -e "${RED}  ✗ FAILED to fix ownership (may need root/sudo)${NC}"
@@ -534,7 +540,9 @@ compare_and_fix() {
                 # Fix permissions if different
                 if [[ "$perms_different" = true ]]; then
                     if chmod "$perms" "$filepath" 2>/dev/null; then
-                        echo -e "${GREEN}  ✓ FIXED permissions${NC}"
+                        if [[ "$QUIET_MODE" = false ]]; then
+                            echo -e "${GREEN}  ✓ FIXED permissions${NC}"
+                        fi
                         log_action "FIXED_PERMISSIONS" "$filepath" "$current_perms" "$perms"
                     else
                         echo -e "${RED}  ✗ FAILED to fix permissions (may need root/sudo)${NC}"
@@ -662,6 +670,7 @@ ${GREEN}SYNC FLAGS (optional - control what to sync):${NC}
     ${YELLOW}--no-user${NC}           Skip user (sync group and permissions)
     ${YELLOW}--no-group${NC}          Skip group (sync user and permissions)
     ${YELLOW}--no-perms${NC}          Skip permissions (sync user and group only)
+    ${YELLOW}--quiet, -q${NC}         Suppress detailed file-by-file output (show summary only)
 
     ${CYAN}Default: sync everything (user, group, and permissions)${NC}
     ${CYAN}Flags can be combined: --user-only with --fix syncs only user${NC}
@@ -755,6 +764,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --no-perms)
             SYNC_PERMS=false
+            shift
+            ;;
+        --quiet|-q)
+            QUIET_MODE=true
             shift
             ;;
         # Main commands that don't take arguments
