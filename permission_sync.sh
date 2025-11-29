@@ -513,7 +513,7 @@ compare_and_fix() {
                     fi
 
                     if [[ -n "$new_owner" ]]; then
-                        if chown "$new_owner" "$filepath" 2>/dev/null; then
+                        if chown -h "$new_owner" "$filepath" 2>/dev/null; then
                             local change_desc=""
                             if [[ "$user_different" = true ]]; then
                                 change_desc="user"
